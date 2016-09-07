@@ -1,0 +1,11 @@
+mod_session_redis
+=================
+
+Intro
+-----
+
+This module is an alternative to the cookie session handling of mod_session_dbd 
+by using Redis as a backend. Sentinel support is implemented to allow for better
+failover handling.
+
+... more to come
