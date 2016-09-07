@@ -1,3 +1,4 @@
+<<<<<<< 8fc571bf25dc58bce38c64c537e76ce998d04bf8
 # Object files
 *.o
 *.ko
@@ -31,3 +32,97 @@
 # Debug files
 *.dSYM/
 *.su
+=======
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+
+# Django stuff:
+*.log
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# OS X
+.DS_Store
+
+# Scratch files
+# db/scratch.sql
+
+# Emacs files
+.emacs.*
+.#*
+
+Makefile
+Makefile.in
+aclocal.m4
+ar-lib
+autom4te.cache
+compile
+config.guess
+config.log
+config.status
+config.sub
+configure
+depcomp
+install-sh
+libtool
+ltmain.sh
+m4/
+missing
+.deps
+.libs
+config.h
+config.h.in*
+stamp-h1
+*.o
+*.lo
+*.la
+.cache
+
+testdir/
+>>>>>>> initial commit
