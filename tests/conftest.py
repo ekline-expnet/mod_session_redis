@@ -23,8 +23,8 @@ def isportopen(port):
         return s.connect_ex(('127.0.0.1',port)) == 0
 
 testdir = os.path.join(os.getcwd(), 'testdir')
-WRAP_HOSTNAME = 'localhost'
-WRAP_IPADDR = '127.0.0.1'
+HOSTNAME = 'localhost'
+IPADDR = '127.0.0.1'
 
 @pytest.fixture(scope='module')
 def http_port(request):
@@ -36,7 +36,7 @@ def cookie_name(request):
     return __COOKIE_NAME__
 
 @pytest.fixture(scope='module')
-def ap(request, http_port):
+def ap(redp, request, http_port):
     httpdir = os.path.join(testdir, 'apache2')
     if os.path.exists(httpdir):
         shutil.rmtree(httpdir)
@@ -52,14 +52,18 @@ def ap(request, http_port):
     wsgidir = os.path.join(os.getcwd(),'tests')
     with open('tests/httpd.conf') as f:
         t = Template(f.read())
+        senhost = senaddrs[0]
         text = t.substitute({'HTTPROOT': httpdir,
-                             'HTTPNAME': WRAP_HOSTNAME,
-                             'HTTPADDR': WRAP_IPADDR,
+                             'HTTPNAME': HOSTNAME,
+                             'HTTPADDR': IPADDR,
                              'COOKIE_NAME': __COOKIE_NAME__,
                              'HTTPPORT': http_port,
                              'HTPASSWD_FILE': os.path.join(os.getcwd(), 'tests', 'authfile'),
                              'WSGI_DIR': wsgidir,
-                             'WSGI_MODULE': os.path.join(wsgidir,'wsgi.py') })
+                             'WSGI_MODULE': os.path.join(wsgidir,'wsgi.py'),
+                             'SENTINEL_HOST': senhost[0],
+                             'SENTINEL_PORT': str(senhost[1]),
+                             'REDIS_MASTER_GROUP_NAME': redis_mgn})
     config = os.path.join(httpdir, 'httpd.conf')
     with open(config, 'w+') as f:
         f.write(text)
@@ -96,9 +100,10 @@ redps = []
 senps = []
 senaddrs = []
 redaddrs = []
+redis_mgn = 'redistestcluster'
 
 @pytest.fixture(scope='module')
-def redp(request, ap):
+def redp(request):
     redis_master_ip_address = ''
     redis_master_ip_port = ''
     redisslaveof = ''
@@ -113,9 +118,10 @@ def redp(request, ap):
         with open('tests/redis%s.conf' % str(i)) as f:
             t = Template(f.read())
             redisport = getsocketport()
-            redaddrs.append((WRAP_IPADDR, redisport))
+            redaddrs.append((IPADDR, redisport))
             text = t.substitute({'REDISDIR': redisdir,
-                                 'REDIS_IP_ADDRESS': WRAP_IPADDR,
+                                 'REDIS_MASTER_GROUP_NAME': redis_mgn,
+                                 'REDIS_IP_ADDRESS': IPADDR,
                                  'REDIS_IP_PORT': redisport,
                                  'REDIS_SLAVEOF': redisslaveof,
                                  'REDIS_MASTER_IP_ADDRESS': redis_master_ip_address,
@@ -127,7 +133,7 @@ def redp(request, ap):
             f.write(text)
 
         if not redis_master_ip_address:
-            redis_master_ip_address = WRAP_IPADDR
+            redis_master_ip_address = IPADDR
             redisslaveof = 'slaveof'
 
         senlogfilename = "redis-sentinel.log"
@@ -138,9 +144,10 @@ def redp(request, ap):
         with open('tests/sentinel%s.conf' % str(i)) as f:
             t = Template(f.read())
             senport = getsocketport()
-            senaddrs.append((WRAP_IPADDR, senport))
+            senaddrs.append((IPADDR, senport))
             text = t.substitute({'SENTINELDIR': sendir,
-                                 'SENTINEL_IP_ADDRESS': WRAP_IPADDR,
+                                 'REDIS_MASTER_GROUP_NAME': redis_mgn,
+                                 'SENTINEL_IP_ADDRESS': IPADDR,
                                  'SENTINEL_IP_PORT': senport,
                                  'REDIS_MASTER_IP_ADDRESS': redis_master_ip_address,
                                  'REDIS_MASTER_IP_PORT': redis_master_ip_port,
@@ -177,11 +184,13 @@ def redp(request, ap):
         senps.append(p)
 
     # Check and wait for slaves to be in sync and sentinels has elected a master
-    master_ready = slaves_ready = sentinels_ready = False
+    master_ready = False
+    slaves_ready = False
+    sentinels_ready = False
     count = 0
     maxcount = 10
     waittime = 0.5
-    while(not master_ready and not slaves_ready and not sentinels_ready):
+    while(not master_ready or not slaves_ready or not sentinels_ready):
         for redaddr in redaddrs:
             host = redaddr[0]
             port = redaddr[1]
@@ -193,8 +202,8 @@ def redp(request, ap):
             else:
                 slaves_ready = role == 'slave' and repinfo.get('master_sync_in_progress') == 0
         s = Sentinel(senaddrs, socket_timeout=0.1)
-        sentinels_ready = s.discover_master('redistestcluster') is not None and \
-                          len(s.discover_slaves('redistestcluster')) == 2
+        sentinels_ready = len(s.discover_master(redis_mgn)) is not None and \
+                          len(s.discover_slaves(redis_mgn)) == 2
         if count >= maxcount:
             raise Exception('waited too long for sentinels to be done')
         time.sleep(waittime)

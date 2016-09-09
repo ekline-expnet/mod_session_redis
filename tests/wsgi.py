@@ -1,34 +1,44 @@
 from cherrypy import expose, request, response, tree
+from cherrypy import tools
 from urllib.parse import urlencode, parse_qs
 import sys
 import os
 
+
 class Root():
 
     @expose
-    def index(*args, **kwargs):
+    @tools.json_out()
+    def auth(self, **kwargs):
+        return self.index()
+
+    @expose
+    @tools.json_out()
+    def index(self, **kwargs):
+        staticvalue = '#56/&522@#'
         seskey = 'HTTP_SESSION'
         http_ses = request.wsgi_environ.get(seskey)
         if http_ses:
-            print('%s found:"%s"' % (seskey, http_ses), file=sys.stderr, flush=True)
+            # print('%s found:"%s"' % (seskey, http_ses), file=sys.stderr, flush=True)
             keys = parse_qs(http_ses,
                             strict_parsing=True,
                             encoding='ASCII')
-            print(keys, file=sys.stderr, flush=True)
-            if 'foo' in keys:
-                keys['foo'][0] = int(keys['foo'][0]) + 1
+            # print(keys, file=sys.stderr, flush=True)
+            # print('%s not found' % (seskey), file=sys.stderr, flush=True)
         else:
-            print('%s not found' % (seskey), file=sys.stderr, flush=True)
-            keys = {'foo': [1],
-                    'bar': ['#56/&522@#']}
+            keys = dict()
+            
+        if 'foo' not in keys:
+            keys['foo'] = [0]
+        if 'bar' not in keys:
+            keys['bar'] = staticvalue
+            
+        keys['foo'][0] = int(keys['foo'][0]) + 1
         sestring = urlencode(keys, doseq=True, encoding='ASCII')
-        print('Setting %s' % sestring, file=sys.stderr, flush=True)
+        # print('Setting %s' % sestring, file=sys.stderr, flush=True)
         response.headers['X-Replace-Session'] = sestring
-        return "<html><body>Test</body></html>"
+        return keys
 
-    @expose
-    def auth(*args, **kwargs):
-        return "<html><body>Authorized</body></html>"
 
 def application(env, start_response):
     cfg = {
@@ -36,7 +46,5 @@ def application(env, start_response):
             'foo': 'bar'
         }
     }
-    app = tree.mount(Root(),
-                              script_name='/',
-                              config=cfg)
+    app = tree.mount(Root(), script_name='/', config=cfg)
     return tree(env, start_response)

@@ -7,4 +7,4 @@ AM_CFLAGS = -O0 -g
 SUBDIRS = src
 
 test: all
-	py.test-3 -s
+	python3 -m pytest -s

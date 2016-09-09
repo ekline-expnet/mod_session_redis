@@ -53,56 +53,154 @@ redisReply *exe_check(redisContext *ctx, const char *format, ...) {
 		char *cmd;
 		int len = redisvFormatCommand(&cmd,format,argp);
 		if (len == -1) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "exe_check rediscFormatCommand: out of memory");
+			ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "exe_check rediscFormatCommand: out of memory");
 		} else if (len == -2) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "exe_check rediscFormatCommand: invalid format string");
+			ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "exe_check rediscFormatCommand: invalid format string");
 		}
 		if (cmd == NULL) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "exe_check no query command produced");
+			ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "exe_check no query command produced");
 		} else if (r == NULL) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "exe_check command '%s' returned NULL", cmd);
+			ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "exe_check command '%s' returned NULL", cmd);
 		} else if (r->type == REDIS_REPLY_ERROR) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "exe_check command '%s' returned error '%s'", cmd, r->str);
+			ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "exe_check command '%s' returned error '%s'", cmd, r->str);
 		}
+		free(cmd);
+	} else if (r->type == REDIS_REPLY_STATUS &&
+			   strcasecmp(r->str,"ok") != 0) {
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "exe_check command did not return ok but '%s' ", r->str);
 	}
 
 	return r;
 }
 
-redisContext *get_rw_ctx() {
+redisContext *get_ctx(bool writable, apr_pool_t *pool) {
 	redisContext *ctx = NULL;
 
 	if (config.host_set && config.socket_set) {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "Both hostname and socket was set. Only one of them can be used at the time");
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "Both hostname and socket was set. Only one of them can be used at the time");
 	} else if (config.host_set && config.port_set) {
 		ctx = redisConnectWithTimeout(config.host, config.port, timeout);
 	} else if (!config.host_set && config.port_set ||
 			   config.host_set && !config.port_set) {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "When using hostname or ports both must be set.");
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "When using hostname or ports both must be set.");
 	} else if (config.socket_set) {
 		ctx = redisConnectUnixWithTimeout(config.socket, timeout);
 	} else {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "Neither hostname or socket was set.");
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "Neither hostname or socket was set.");
+		return NULL;
 	}
 
 	if (ctx->err) {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "Connection error: %s", ctx->errstr);
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "Connection error: %s", ctx->errstr);
 		redisFree(ctx);
 	} else {
 		redisReply *r = NULL;
 		if (config.is_sentinel_set && config.is_sentinel &&
 			config.sentinel_master_gn_set) {
-			r = exe_check(ctx, "SENTINEL master %s", config.sentinel_master_gn);
+			char *ip = NULL;
+			int port = -1;
+
+			if (writable) {
+				//Ask for master
+				r = exe_check(ctx, "SENTINEL master %s", config.sentinel_master_gn);
+				if (r->type != REDIS_REPLY_ARRAY) {
+					ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "master query did not return array %d but %d", REDIS_REPLY_ARRAY, r->type);
+					freeReplyObject(r);
+					redisFree(ctx);
+					return NULL;
+				}
+
+				for (int i = 0; i < r->elements; i += 2) {
+					char* key = r->element[i]->str;
+
+					if(!strcmp(key, "ip")) {
+						char *val = r->element[i + 1]->str;
+						ip = apr_pcalloc(pool, sizeof(char) * strlen(val));
+						strcpy(ip,val);
+					} else if(!strcmp(key, "port")) {
+						port = atoi(r->element[i + 1]->str);
+					}
+
+					if (ip != NULL && port > 0) {
+						i = r->elements;
+					}
+				}
+			} else {
+				//Ask for slaves
+				r = exe_check(ctx, "SENTINEL slaves %s", config.sentinel_master_gn);
+				if (r->type != REDIS_REPLY_ARRAY) {
+					ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "slaves query did not return array %d but %d", REDIS_REPLY_ARRAY, r->type);
+					freeReplyObject(r);
+					redisFree(ctx);
+					return NULL;
+				}
+
+				//Iterate slaves and create overview
+				// TODO: prioritize slaves more intelligently
+				int sl_count = r->elements;
+				char *sl_hostnames[sl_count];
+				int sl_ports[sl_count];
+
+				for (int i = 0; i < r->elements; i++) {
+					redisReply *r2 = r->element[i];
+					if (r2->type != REDIS_REPLY_ARRAY || r2->elements % 2) {
+						ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "slaves query had no sub array or bad count");
+						freeReplyObject(r);
+						redisFree(ctx);
+						return NULL;
+					}
+
+					for (int j = 0; j < r2->elements; j+=2) {
+						if (r2->element[j]->type != REDIS_REPLY_STRING ||
+							r2->element[j+1]->type != REDIS_REPLY_STRING) {
+								ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "slaves query (%d,%d) had did not return string", i, j);
+								freeReplyObject(r);
+								redisFree(ctx);
+								return NULL;
+						}
+
+						char *key = r2->element[j]->str;
+						char *value = r2->element[j+1]->str;
+						if(!strcmp(key, "ip")) {
+							sl_hostnames[i] = apr_pcalloc(pool, (sizeof(char) * strlen(value)));
+							strcpy(sl_hostnames[i], value);
+						} else if(!strcmp(key, "port")) {
+							sl_ports[i] = atoi(value);
+						}
+					}
+				}
+
+				srand(time(NULL));
+				int selection = rand() % 2;
+				ip = apr_pcalloc(pool, sizeof(char) * strlen(sl_hostnames[selection]));
+				strcpy(ip, sl_hostnames[selection]);
+				port = sl_ports[selection];
+				// Free sl_hostnames
+				/* free(sl_hostnames); */
+			}
+
+			freeReplyObject(r);
+
+			if(ip == NULL || port < 0) {
+				ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, NULL, "sentinel did not find a suitable redis host");
+				redisFree(ctx);
+				return NULL;
+			}
+
+			redisFree(ctx);
+			// Dont free() *ip. It's still being referenced afterwards
+			ctx = redisConnectWithTimeout(ip, port, timeout);
+			// TODO: Check up on master to se if sentinel is lying?
+			// TODO: Handle timeouts and re-query sentinel until a master is found
+			// within some timelimit. Then bailout.
+			int db = 0;
+			if (config.db_set) {
+				db = config.db;
+			}
+
+			r = exe_check(ctx, "SELECT %d", db);
 			freeReplyObject(r);
 		}
-
-		int db = 0;
-		if (config.db_set) {
-			db = config.db;
-		}
-
-		r = exe_check(ctx, "SELECT %d", db);
-		freeReplyObject(r);
 	}
 
 	return ctx;
@@ -112,12 +210,28 @@ apr_status_t redis_save(request_rec * r, const char *oldkey,
 						const char *newkey, const char *val, apr_int64_t expiry) {
 	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "saving oldkey=\'%s\', newkey=\'%s\', val=\'%s\', expiry=\'%ld\'", oldkey, newkey, val, expiry);
 
-	redisContext *ctx = get_rw_ctx();
+	redisContext *ctx = get_ctx(true, r->pool);
 
 	if (ctx == NULL) {
+		redisFree(ctx);
 		return APR_EGENERAL;
 	}
 
+	// time is in microseconds
+	apr_time_t now = apr_time_now();
+	// redis counts expirytime in seconds
+	long r_expire = (((expiry - now) + 500) / 1000000) + 1;
+	if (r_expire < 1) {
+		ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "redis expire seconds is less than 1 (%ld)", r_expire);
+		redisFree(ctx);
+		return APR_EGENERAL;
+	}
+
+	// TODO: Implement locking
+	// TODO: What if already exists?
+	redisReply *rr = exe_check(ctx, "SETEX %s %ld %s", newkey, r_expire, val);
+
+	freeReplyObject(rr);
 	redisFree(ctx);
 
 	return APR_SUCCESS;
@@ -125,12 +239,51 @@ apr_status_t redis_save(request_rec * r, const char *oldkey,
 
 apr_status_t redis_load(apr_pool_t *p, request_rec * r,
 						const char *key, const char **val) {
-	ap_log_rerror(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r, "loading key=\'%s\'", key);
+	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "loading key=\'%s\'", key);
+
+	redisContext *ctx = get_ctx(false, r->pool);
+	if (ctx == NULL) {
+		redisFree(ctx);
+		return APR_EGENERAL;
+	}
+
+	// TODO: Implement locking
+	// TODO: What if not exists? Error?
+	redisReply *rr = exe_check(ctx, "GET %s", key);
+
+	if (rr->type != REDIS_REPLY_STRING) {
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "get command returned type %d while expected %d (string)", rr->type, REDIS_REPLY_STRING);
+		freeReplyObject(rr);
+		redisFree(ctx);
+		return APR_EGENERAL;
+	}
+
+	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "get command returned %s", rr->str);
+	*val = apr_pstrdup(p, rr->str);
+
+
+	freeReplyObject(rr);
+	redisFree(ctx);
+
 	return APR_SUCCESS;
 }
 
 apr_status_t redis_remove(request_rec * r, const char *key) {
-	ap_log_rerror(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r, "removing key=\'%s\'", key);
+	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r, "removing key=\'%s\'", key);
+
+	redisContext *ctx = get_ctx(true, r->pool);
+	if (ctx == NULL) {
+		redisFree(ctx);
+		return APR_EGENERAL;
+	}
+
+	// TODO: Implement locking
+	// TODO: What if not exists? Error?
+	redisReply *rr = exe_check(ctx, "DEL %s ", key);
+
+	freeReplyObject(rr);
+	redisFree(ctx);
+
 	return APR_SUCCESS;
 }
 
@@ -161,26 +314,25 @@ static apr_status_t session_redis_save(request_rec *r, session_rec *z) {
         /* don't cache pages with a session */
         apr_table_addn(r->headers_out, "Cache-Control", "no-cache");
 
-        /* if the session is new or changed, make a new session ID */
+		/* FIXME: mod_session_dbd recreates uuid if dirty. Is there any need for this? */
         if (z->uuid) {
             oldkey = apr_pcalloc(r->pool, APR_UUID_FORMATTED_LENGTH + 1);
             apr_uuid_format(oldkey, z->uuid);
         }
-        if (z->dirty || !oldkey) {
+
+        if (oldkey) {
+            newkey = oldkey;
+        } else if (z->dirty) {
             z->uuid = apr_pcalloc(z->pool, sizeof(apr_uuid_t));
             apr_uuid_get(z->uuid);
             newkey = apr_pcalloc(r->pool, APR_UUID_FORMATTED_LENGTH + 1);
             apr_uuid_format(newkey, z->uuid);
         }
-        else {
-            newkey = oldkey;
-        }
 
         /* save the session with the uuid as key */
         if (z->encoded && z->encoded[0]) {
             ret = redis_save(r, oldkey, newkey, z->encoded, z->expiry);
-        }
-        else {
+        } else {
             ret = redis_remove(r, oldkey);
         }
         if (ret != APR_SUCCESS) {
@@ -218,7 +370,6 @@ static apr_status_t session_redis_load(request_rec *r, session_rec **z) {
     }
 
     /* first look in the notes */
-	/* FIXME: Why? */
     note = apr_pstrcat(m->pool, MOD_SESSION_REDIS, name, NULL);
     zz = (session_rec *)apr_table_get(m->notes, note);
     if (zz) {
@@ -249,6 +400,8 @@ static apr_status_t session_redis_load(request_rec *r, session_rec **z) {
         return DECLINED;
     }
 
+	ap_log_rerror(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r, "got cookie value from redis: '%s'\n", val);
+
     /* create a new session and return it */
     zz = (session_rec *) apr_pcalloc(m->pool, sizeof(session_rec));
     zz->pool = m->pool;
@@ -257,7 +410,9 @@ static apr_status_t session_redis_load(request_rec *r, session_rec **z) {
         apr_uuid_t *uuid = apr_pcalloc(zz->pool, sizeof(apr_uuid_t));
         if (APR_SUCCESS == apr_uuid_parse(uuid, key)) {
             zz->uuid = uuid;
-        }
+        }else {
+			ap_log_rerror(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r, "did not parse uid from key: '%s'", key);
+		}
     }
     zz->encoded = val;
     *z = zz;
